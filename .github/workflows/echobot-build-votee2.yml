@@ -1,4 +1,4 @@
-name: .NET BOT D1 BUILD votee
+name: .NET BOT D1 BUILD votee2
 
 on:
   push:
@@ -6,14 +6,14 @@ on:
       - 'main'
     paths:
       - './Samples/PublicSamples/EchoBot/src/**'
-      - .github/workflows/echobot-build-votee.yml
+      - .github/workflows/echobot-build-votee2.yml
 
   pull_request:
     branches:
       - 'main'
     paths:
       - './Samples/PublicSamples/EchoBot/src/**'
-      - .github/workflows/echobot-build-votee.yml
+      - .github/workflows/echobot-build-votee2.yml
 
   workflow_dispatch:
 
@@ -23,7 +23,7 @@ env:
   Component:   EchoBot
   BuildName:   0.1.${{ github.run_number }}
   Environment: D1
-  OrgName:     votee
+  OrgName:     votee2
   Location:    centralus
 
 jobs:
@@ -63,7 +63,7 @@ jobs:
     - name: Login via Az module
       uses: azure/login@v2
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS_votee_BOT }}
+        creds: ${{ secrets.AZURE_CREDENTIALS_votee2_BOT }}
         enable-AzPSSession: true
 
     - name: G1_RG_UploadArtifacts_to_Blob
