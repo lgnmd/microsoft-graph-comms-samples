@@ -30,7 +30,6 @@ namespace EchoBot.Util
             {
                 Scheme = req.Scheme,
                 Host = req.Host.Host,
-                Port = req.Host.Port ?? (req.Scheme == "https" ? 443 : 80),
                 Path = req.PathBase.Add(req.Path),
                 Query = req.QueryString.ToString()
             }.Uri);
@@ -45,7 +44,7 @@ namespace EchoBot.Util
             => msg.Set(m => m.Content = new StreamContent(req.Body));
 
         private static HttpRequestMessage SetContentType(this HttpRequestMessage msg, HttpRequest req)
-            => msg.Set(m => m.Content.Headers.Add("Content-Type", req.ContentType ?? "application/octet-stream"), applyIf: req.Headers.ContainsKey("Content-Type"));
+            => msg.Set(m => m.Content.Headers.Add("Content-Type", req.ContentType), applyIf: req.Headers.ContainsKey("Content-Type"));
 
         private static HttpRequestMessage Set(this HttpRequestMessage msg, Action<HttpRequestMessage> config, bool applyIf = true)
         {

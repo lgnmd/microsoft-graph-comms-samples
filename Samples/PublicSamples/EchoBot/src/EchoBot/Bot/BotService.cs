@@ -26,8 +26,7 @@ using Microsoft.Skype.Bots.Media;
 using System.Collections.Concurrent;
 using System.Net;
 using EchoBot.Util;
-using Microsoft.Graph.Models;
-using Microsoft.Graph.Contracts;
+// Removed Microsoft.Graph.Models and Microsoft.Graph.Contracts usings as they are not available in Microsoft.Graph v4.x
 
 namespace EchoBot.Bot
 {
@@ -144,6 +143,7 @@ namespace EchoBot.Bot
             this.Client = builder.Build();
             this.Client.Calls().OnIncoming += this.CallsOnIncoming;
             this.Client.Calls().OnUpdated += this.CallsOnUpdated;
+
         }
 
         /// <summary>
