@@ -29,9 +29,13 @@ namespace EchoBot.Media
         private readonly SpeechConfig _speechConfig;
         private SpeechRecognizer _recognizer;
         private readonly SpeechSynthesizer _synthesizer;
+
+        private readonly WebSocketClient _webSocketClient;
+        private readonly RedisService _redisService; // 添加Redis服务
+
         /// <summary>
         /// Initializes a new instance of the <see cref="SpeechService" /> class.
-        public SpeechService(AppSettings settings, ILogger logger)
+        public SpeechService(AppSettings settings, ILogger logger, string meetingId = null, string callId = null)
         {
             _logger = logger;
 
@@ -42,6 +46,79 @@ namespace EchoBot.Media
             var audioConfig = AudioConfig.FromStreamOutput(_audioOutputStream);
             _synthesizer = new SpeechSynthesizer(_speechConfig, audioConfig);
 
+            
+            this._webSocketClient = new WebSocketClient();
+            
+            // 设置会议信息
+            if (!string.IsNullOrEmpty(meetingId))
+            {
+                this._webSocketClient.SetMeetingInfo(meetingId, callId);
+                _logger.LogInformation($"SpeechService已设置会议信息 - 会议ID: {meetingId}, 通话ID: {callId ?? "未设置"}");
+            }
+            
+            // 初始化Redis服务（如果配置了Redis连接字符串）
+            try
+            {
+                if (!string.IsNullOrEmpty(settings.RedisConnectionString))
+                {
+                    this._redisService = new RedisService(settings.RedisConnectionString, logger);
+                    this._webSocketClient.SetRedisService(this._redisService);
+                    _logger.LogInformation("Redis服务已初始化");
+                    
+                    // 测试Redis连接
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(2000); // 等待2秒让连接稳定
+                            var testResult = await this._redisService.TestConnectionAsync();
+                            _logger.LogInformation($"Redis连接测试结果: {testResult}");
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Redis连接测试失败");
+                        }
+                    });
+                }
+                else
+                {
+                    _logger.LogInformation("Redis连接字符串未配置，跳过Redis服务初始化");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Redis服务初始化失败，将继续运行但不使用Redis功能");
+            }
+            
+            // 启动后台任务来初始化WebSocket连接和监听
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await this._webSocketClient.Connect();
+                    await this._webSocketClient.StartListening();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "WebSocket连接或监听失败");
+                }
+            });
+        }
+
+        // 添加设置会议信息的方法
+        public void SetMeetingInfo(string meetingId, string callId = null)
+        {
+            if (this._webSocketClient != null)
+            {
+                this._webSocketClient.SetMeetingInfo(meetingId, callId);
+                _logger.LogInformation($"已更新会议信息 - 会议ID: {meetingId}, 通话ID: {callId ?? "未设置"}");
+            }
+        }
+
+        // 获取会议信息的方法
+        public string GetMeetingInfo()
+        {
+            return this._webSocketClient?.GetMeetingInfoJson() ?? "会议信息未设置";
         }
 
         /// <summary>
@@ -66,6 +143,10 @@ namespace EchoBot.Media
                     Marshal.Copy(audioBuffer.Data, buffer, 0, (int)bufferLength);
 
                     _audioInputStream.Write(buffer);
+
+
+                    // send audio buffer  
+                   this._webSocketClient.SendMessage(buffer);  
                 }
             }
             catch (Exception e)
@@ -140,7 +221,7 @@ namespace EchoBot.Media
 
                 _recognizer.Recognizing += (s, e) =>
                 {
-                    _logger.LogInformation($"RECOGNIZING: Text={e.Result.Text}");
+                    // _logger.LogInformation($"RECOGNIZING: Text={e.Result.Text}");
                 };
 
                 _recognizer.Recognized += async (s, e) =>
@@ -150,10 +231,10 @@ namespace EchoBot.Media
                         if (string.IsNullOrEmpty(e.Result.Text))
                             return;
 
-                        _logger.LogInformation($"RECOGNIZED: Text={e.Result.Text}");
+                        // _logger.LogInformation($"RECOGNIZED: Text={e.Result.Text}");
                         // We recognized the speech
                         // Now do Speech to Text
-                        await TextToSpeech(e.Result.Text);
+                        // await TextToSpeech(e.Result.Text);
                     }
                     else if (e.Result.Reason == ResultReason.NoMatch)
                     {

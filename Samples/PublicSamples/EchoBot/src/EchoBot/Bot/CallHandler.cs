@@ -6,6 +6,7 @@ using Microsoft.Graph.Communications.Common.Telemetry;
 using Microsoft.Graph.Communications.Resources;
 // Removed Microsoft.Graph.Models using as it is not available in Microsoft.Graph v4.x for our usage
 using System.Timers;
+using System.Text.Json;
 
 namespace EchoBot.Bot
 {
@@ -42,8 +43,73 @@ namespace EchoBot.Bot
             this.Call = statefulCall;
             this.Call.OnUpdated += this.CallOnUpdated;
             this.Call.Participants.OnUpdated += this.ParticipantsOnUpdated;
+            
+            // 获取会议ID和通话ID
+            var meetingId = GetMeetingId(statefulCall);
+            var callId = statefulCall.Resource.CallChainId;
+            
+            GraphLogger.Info($"创建CallHandler - 会议ID: {meetingId ?? "未设置"}, 通话ID: {callId}");
+            
+            this.BotMediaStream = new BotMediaStream(
+                this.Call.GetLocalMediaSession(), 
+                callId, 
+                this.GraphLogger, 
+                logger, 
+                settings, 
+                meetingId
+            );
+        }
 
-            this.BotMediaStream = new BotMediaStream(this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings);
+        // 获取会议ID的方法
+        private string GetMeetingId(ICall call)
+        {
+            try
+            {
+                // 尝试从通话资源中获取会议ID
+                if (call?.Resource?.ChatInfo?.ThreadId != null)
+                {
+                    return call.Resource.ChatInfo.ThreadId;
+                }
+                
+                // 如果没有ThreadId，尝试使用通话ID作为会议ID
+                if (call?.Resource?.Id != null)
+                {
+                    return call.Resource.Id;
+                }
+                
+                return null;
+            }
+            catch (Exception ex)
+            {
+                GraphLogger.Error($"获取会议ID时出错: {ex.Message}");
+                return null;
+            }
+        }
+
+        // 获取当前会议信息的方法
+        public string GetCurrentMeetingInfo()
+        {
+            try
+            {
+                var meetingId = GetMeetingId(this.Call);
+                var callId = this.Call.Resource.CallChainId;
+                
+                var meetingInfo = new
+                {
+                    MeetingId = meetingId,
+                    CallId = callId,
+                    CallState = this.Call.Resource.State.ToString(),
+                    ParticipantsCount = this.Call.Participants.Count,
+                    Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                };
+                
+                return System.Text.Json.JsonSerializer.Serialize(meetingInfo);
+            }
+            catch (Exception ex)
+            {
+                GraphLogger.Error($"获取会议信息时出错: {ex.Message}");
+                return "获取会议信息失败";
+            }
         }
 
         /// <inheritdoc/>

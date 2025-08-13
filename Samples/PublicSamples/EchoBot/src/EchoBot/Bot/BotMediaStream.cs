@@ -60,13 +60,15 @@ namespace EchoBot.Bot
         /// <param name="graphLogger">The Graph logger.</param>
         /// <param name="logger">The logger.</param>
         /// <param name="settings">Azure settings</param>
+        /// <param name="meetingId">The meeting identity</param>
         /// <exception cref="InvalidOperationException">A mediaSession needs to have at least an audioSocket</exception>
         public BotMediaStream(
             ILocalMediaSession mediaSession,
             string callId,
             IGraphLogger graphLogger,
             ILogger logger,
-            AppSettings settings
+            AppSettings settings,
+            string meetingId = null
         )
             : base(graphLogger)
         {
@@ -97,8 +99,11 @@ namespace EchoBot.Bot
 
             if (_settings.UseSpeechService)
             {
-                _languageService = new SpeechService(_settings, _logger);
+                // 传递会议ID和通话ID给SpeechService
+                _languageService = new SpeechService(_settings, _logger, meetingId, callId);
                 _languageService.SendMediaBuffer += this.OnSendMediaBuffer;
+                
+                _logger.LogInformation($"BotMediaStream已创建，会议ID: {meetingId ?? "未设置"}, 通话ID: {callId}");
             }
         }
 
@@ -200,7 +205,11 @@ namespace EchoBot.Bot
         private async void OnAudioMediaReceived(object? sender, AudioMediaReceivedEventArgs e)
         {
             _logger.LogTrace($"Received Audio: [AudioMediaReceivedEventArgs(Data=<{e.Buffer.Data.ToString()}>, Length={e.Buffer.Length}, Timestamp={e.Buffer.Timestamp})]");
-
+            // participants = this.GetParticipants();
+            // _logger.LogInformation($"received {participants.Count} participants");
+            // todo 获取人物信息？
+            // this.call
+            //GetParticipants()
             try
             {
                 if (!startVideoPlayerCompleted.Task.IsCompleted) { return; }

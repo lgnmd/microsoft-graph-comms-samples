@@ -104,6 +104,17 @@ namespace EchoBot
         /// </summary>
         [Required]
         public string MediaDnsName { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Redis connection string
+        /// Used for caching meeting data and activities
+        /// </summary>
+        public string RedisConnectionString { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether to enable Redis functionality
+        /// </summary>
+        public bool EnableRedis { get; set; } = false;
     }
 }
 
