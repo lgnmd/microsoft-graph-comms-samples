@@ -9,8 +9,12 @@ IHost host = Host.CreateDefaultBuilder(args)
     })
     .ConfigureServices(services =>
     {
-        LoggerProviderOptions.RegisterProviderOptions<
-            EventLogSettings, EventLogLoggerProvider>(services);
+        // Only register EventLog provider on Windows platform
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            LoggerProviderOptions.RegisterProviderOptions<
+                EventLogSettings, EventLogLoggerProvider>(services);
+        }
 
         services.AddSingleton<IBotHost, BotHost>();
 
