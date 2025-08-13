@@ -17,6 +17,7 @@ using EchoBot.Util;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Graph.Communications.Common.Telemetry;
+using System.Runtime.InteropServices;
 
 namespace EchoBot
 {
@@ -77,8 +78,12 @@ namespace EchoBot
             builder.Logging.AddApplicationInsights();
             builder.Logging.SetMinimumLevel(LogLevel.Information);
 
-            builder.Logging.AddEventLog(config => config.SourceName = "Echo Bot Service");
-
+            // Only add EventLog provider on Windows platform
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                builder.Logging.AddEventLog(config => config.SourceName = "Echo Bot Service");
+            }
+            
             builder.Services.AddSingleton<IBotService, BotService>();
 
             // Bot Settings Setup
