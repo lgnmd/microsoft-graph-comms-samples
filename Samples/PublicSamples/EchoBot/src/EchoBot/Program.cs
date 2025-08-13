@@ -1,6 +1,7 @@
 using EchoBot;
 using Microsoft.Extensions.Logging.Configuration;
 using Microsoft.Extensions.Logging.EventLog;
+using System.Runtime.InteropServices;
 
 IHost host = Host.CreateDefaultBuilder(args)
     .UseWindowsService(options =>
