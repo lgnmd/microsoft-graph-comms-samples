@@ -100,7 +100,8 @@ namespace EchoBot.Bot
             if (_settings.UseSpeechService)
             {
                 // 传递会议ID和通话ID给SpeechService
-                _languageService = new SpeechService(_settings, _logger, meetingId, callId);
+                                                                                                        // AsrClientType.WebSocket
+                _languageService = new SpeechService(_settings, _logger,participants, meetingId, callId,AsrClientType.WebSocket);
                 _languageService.SendMediaBuffer += this.OnSendMediaBuffer;
                 
                 _logger.LogInformation($"BotMediaStream已创建，会议ID: {meetingId ?? "未设置"}, 通话ID: {callId}");

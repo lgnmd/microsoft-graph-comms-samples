@@ -62,117 +62,53 @@ namespace EchoBot.Media
         }
 
         /// <summary>
-        /// 保存会议活动到Redis
+        /// 安全地序列化对象到JSON，避免循环引用问题
         /// </summary>
-        public async Task<bool> SaveMeetingActivityAsync(string meetingId, string callId, string activity, string type = "Transcription")
+        private string SafeSerializeToJson(object obj)
         {
             try
             {
-                var key = $"meeting:{meetingId}:activities";
-                var activityData = new
+                var options = new JsonSerializerOptions
                 {
-                    MeetingId = meetingId,
-                    CallId = callId,
-                    Activity = activity,
-                    Type = type,
-                    Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-                };
-
-                var json = JsonSerializer.Serialize(activityData);
-                
-                // 使用Redis List存储活动记录
-                await _database.ListRightPushAsync(key, json);
-                
-                // 设置过期时间（24小时）
-                await _database.KeyExpireAsync(key, TimeSpan.FromHours(24));
-                
-                _logger.LogInformation($"已保存会议活动到Redis - 会议ID: {meetingId}, 活动: {activity}");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"保存会议活动到Redis失败 - 会议ID: {meetingId}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// 以会议ID为key保存会议活动（增强版）
-        /// </summary>
-        public async Task<bool> SaveMeetingActivityWithKeyAsync(string meetingId, string callId, string activity, string type = "Transcription", Dictionary<string, object> additionalData = null)
-        {
-            try
-            {
-                // 主活动列表key
-                var activitiesKey = $"meeting:{meetingId}:activities";
-                
-                // 创建活动记录
-                var activityData = new Dictionary<string, object>
-                {
-                    ["MeetingId"] = meetingId,
-                    ["CallId"] = callId,
-                    ["Activity"] = activity,
-                    ["Type"] = type,
-                    ["Timestamp"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    ["MessageId"] = Guid.NewGuid().ToString(),
-                    ["Source"] = "WebSocket"
+                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+                    WriteIndented = false,
+                    // 移除 ReferenceHandler.Preserve，避免生成 $id 等引用跟踪信息
+                    MaxDepth = 32
                 };
                 
-                // 添加额外数据
-                if (additionalData != null)
+                return JsonSerializer.Serialize(obj, options);
+            }
+            catch (JsonException ex) when (ex.Message.Contains("cycle") || ex.Message.Contains("depth"))
+            {
+                // 如果遇到循环引用或深度问题，尝试创建一个简化的对象
+                _logger.LogWarning($"JSON序列化遇到循环引用或深度问题，使用简化对象: {ex.Message}");
+                
+                try
                 {
-                    foreach (var kvp in additionalData)
+                    // 创建一个包含基本信息的简化对象
+                    var simplifiedObj = new
                     {
-                        activityData[kvp.Key] = kvp.Value;
-                    }
+                        Error = "原始对象包含循环引用，无法序列化",
+                        Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                        Type = obj?.GetType().Name ?? "Unknown"
+                    };
+                    
+                    return JsonSerializer.Serialize(simplifiedObj, new JsonSerializerOptions
+                    {
+                        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+                        WriteIndented = false
+                    });
                 }
-                
-                var json = JsonSerializer.Serialize(activityData, new JsonSerializerOptions
+                catch
                 {
-                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                    WriteIndented = false
-                });
-                
-                // 1. 保存到活动列表
-                await _database.ListRightPushAsync(activitiesKey, json);
-                
-                // 2. 保存最新活动到会议摘要
-                var summaryKey = $"meeting:{meetingId}:summary";
-                var summaryData = new
-                {
-                    MeetingId = meetingId,
-                    CallId = callId,
-                    LastActivity = activity,
-                    LastActivityTime = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    LastActivityType = type,
-                    TotalActivities = await _database.ListLengthAsync(activitiesKey),
-                    Status = "Active",
-                    UpdatedAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-                };
-                
-                var summaryJson = JsonSerializer.Serialize(summaryData, new JsonSerializerOptions
-                {
-                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                    WriteIndented = false
-                });
-                await _database.StringSetAsync(summaryKey, summaryJson, TimeSpan.FromHours(24));
-                
-                // 3. 保存到时间索引（用于按时间查询）
-                var timeIndexKey = $"meeting:{meetingId}:timeindex";
-                var timeScore = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                await _database.SortedSetAddAsync(timeIndexKey, json, timeScore);
-                
-                // 4. 设置过期时间
-                await _database.KeyExpireAsync(activitiesKey, TimeSpan.FromHours(24));
-                await _database.KeyExpireAsync(timeIndexKey, TimeSpan.FromHours(24));
-                
-                _logger.LogInformation($"已以会议ID为key保存会议活动到Redis - 会议ID: {meetingId}, 活动: {activity}");
-                return true;
+                    // 最后的备选方案
+                    return JsonSerializer.Serialize(new { Error = "序列化失败", Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"以会议ID为key保存会议活动到Redis失败 - 会议ID: {meetingId}");
-                return false;
+                _logger.LogError(ex, "JSON序列化失败");
+                return JsonSerializer.Serialize(new { Error = "序列化失败", Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") });
             }
         }
 
@@ -200,26 +136,6 @@ namespace EchoBot.Media
         }
 
         /// <summary>
-        /// 保存会议信息到Redis
-        /// </summary>
-        public async Task<bool> SaveMeetingInfoAsync(string meetingId, string callId, string meetingInfo)
-        {
-            try
-            {
-                var key = $"meeting:{meetingId}:info";
-                await _database.StringSetAsync(key, meetingInfo, TimeSpan.FromHours(24));
-                
-                _logger.LogInformation($"已保存会议信息到Redis - 会议ID: {meetingId}");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"保存会议信息到Redis失败 - 会议ID: {meetingId}");
-                return false;
-            }
-        }
-
-        /// <summary>
         /// 获取会议信息
         /// </summary>
         public async Task<string> GetMeetingInfoAsync(string meetingId)
@@ -234,45 +150,6 @@ namespace EchoBot.Media
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"获取会议信息失败 - 会议ID: {meetingId}");
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// 保存参与者信息到Redis
-        /// </summary>
-        public async Task<bool> SaveParticipantInfoAsync(string meetingId, string participantId, string participantInfo)
-        {
-            try
-            {
-                var key = $"meeting:{meetingId}:participants:{participantId}";
-                await _database.StringSetAsync(key, participantInfo, TimeSpan.FromHours(24));
-                
-                _logger.LogInformation($"已保存参与者信息到Redis - 会议ID: {meetingId}, 参与者ID: {participantId}");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"保存参与者信息到Redis失败 - 会议ID: {meetingId}, 参与者ID: {participantId}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// 获取参与者信息
-        /// </summary>
-        public async Task<string> GetParticipantInfoAsync(string meetingId, string participantId)
-        {
-            try
-            {
-                var key = $"meeting:{meetingId}:participants:{participantId}";
-                var info = await _database.StringGetAsync(key);
-                
-                return info.HasValue ? info.ToString() : null;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"获取参与者信息失败 - 会议ID: {meetingId}, 参与者ID: {participantId}");
                 return null;
             }
         }
@@ -306,15 +183,30 @@ namespace EchoBot.Media
                 {
                     foreach (var kvp in additionalData)
                     {
-                        transcriptionData[kvp.Key] = kvp.Value;
+                        // 检查值是否可以安全序列化
+                        if (kvp.Value != null)
+                        {
+                            try
+                            {
+                                // 尝试序列化来验证是否安全
+                                var testJson = SafeSerializeToJson(kvp.Value);
+                                transcriptionData[kvp.Key] = kvp.Value;
+                            }
+                            catch
+                            {
+                                // 如果无法序列化，存储一个简化的值
+                                transcriptionData[kvp.Key] = $"无法序列化的对象: {kvp.Value.GetType().Name}";
+                                _logger.LogWarning($"跳过无法序列化的额外数据: {kvp.Key} = {kvp.Value.GetType().Name}");
+                            }
+                        }
+                        else
+                        {
+                            transcriptionData[kvp.Key] = kvp.Value;
+                        }
                     }
                 }
                 
-                var json = JsonSerializer.Serialize(transcriptionData, new JsonSerializerOptions
-                {
-                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                    WriteIndented = false
-                });
+                var json = SafeSerializeToJson(transcriptionData);
                 
                 // 1. 保存全量转录结果（覆盖存储）
                 await _database.StringSetAsync(transcriptionKey, json, TimeSpan.FromHours(24));
@@ -333,11 +225,7 @@ namespace EchoBot.Media
                     StorageType = "FullData"
                 };
                 
-                var summaryJson = JsonSerializer.Serialize(summaryData, new JsonSerializerOptions
-                {
-                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                    WriteIndented = false
-                });
+                var summaryJson = SafeSerializeToJson(summaryData);
                 await _database.StringSetAsync(summaryKey, summaryJson, TimeSpan.FromHours(24));
                 
                 // 3. 保存到时间索引（用于按时间查询）
@@ -360,21 +248,61 @@ namespace EchoBot.Media
         }
 
         /// <summary>
-        /// 获取会议全量语音识别结果
+        /// 设置键值对
         /// </summary>
-        public async Task<string> GetMeetingFullTranscriptionAsync(string meetingId)
+        /// <param name="key">键</param>
+        /// <param name="value">值</param>
+        /// <param name="expiry">过期时间</param>
+        /// <returns>是否设置成功</returns>
+        public async Task<bool> SetAsync(string key, string value, TimeSpan? expiry = null)
         {
             try
             {
-                var transcriptionKey = $"meeting:{meetingId}:transcription";
-                var transcription = await _database.StringGetAsync(transcriptionKey);
-                
-                return transcription.HasValue ? transcription.ToString() : null;
+                return await _database.StringSetAsync(key, value, expiry);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"获取会议全量语音识别结果失败 - 会议ID: {meetingId}");
+                _logger.LogError(ex, $"设置Redis键值对失败 - 键: {key}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 获取键值
+        /// </summary>
+        /// <param name="key">键</param>
+        /// <returns>值，如果不存在则返回null</returns>
+        public async Task<string> GetAsync(string key)
+        {
+            try
+            {
+                var value = await _database.StringGetAsync(key);
+                return value.HasValue ? value.ToString() : null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"获取Redis键值失败 - 键: {key}");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// 获取匹配模式的键
+        /// </summary>
+        /// <param name="pattern">键模式，支持通配符</param>
+        /// <returns>匹配的键列表</returns>
+        public async Task<List<string>> GetKeysAsync(string pattern)
+        {
+            try
+            {
+                var server = _redis.GetServer(_redis.GetEndPoints().First());
+                var keys = server.Keys(pattern: pattern);
+                return keys.Select(k => k.ToString()).ToList();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"获取Redis键失败 - 模式: {pattern}");
+                return new List<string>();
             }
         }
 
@@ -390,42 +318,6 @@ namespace EchoBot.Media
             catch
             {
                 return false;
-            }
-        }
-
-        /// <summary>
-        /// 获取Redis连接统计信息
-        /// </summary>
-        public string GetConnectionInfo()
-        {
-            try
-            {
-                var endpoints = _redis?.GetEndPoints();
-                if (endpoints != null && endpoints.Length > 0)
-                {
-                    var server = _redis.GetServer(endpoints[0]);
-                    var info = new
-                    {
-                        IsConnected = _redis.IsConnected,
-                        Endpoint = endpoints[0].ToString(),
-                        Database = _database.Database,
-                        ServerVersion = server.Version,
-                        ConnectedClients = server.ClientList().Length
-                    };
-                    
-                    return JsonSerializer.Serialize(info, new JsonSerializerOptions
-                    {
-                        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                        WriteIndented = false
-                    });
-                }
-                
-                return "Redis连接信息不可用";
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "获取Redis连接信息失败");
-                return "获取连接信息失败";
             }
         }
 
@@ -476,7 +368,9 @@ namespace EchoBot.Media
                 return JsonSerializer.Serialize(testResult, new JsonSerializerOptions
                 {
                     Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                    WriteIndented = false
+                    WriteIndented = false,
+                    ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.Preserve,
+                    MaxDepth = 32
                 });
             }
             catch (Exception ex)
@@ -493,7 +387,9 @@ namespace EchoBot.Media
                 return JsonSerializer.Serialize(errorResult, new JsonSerializerOptions
                 {
                     Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                    WriteIndented = false
+                    WriteIndented = false,
+                    ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.Preserve,
+                    MaxDepth = 32
                 });
             }
         }

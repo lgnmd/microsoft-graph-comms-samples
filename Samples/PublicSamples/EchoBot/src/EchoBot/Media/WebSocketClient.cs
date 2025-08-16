@@ -1,10 +1,9 @@
 using System;
 using System.Net.WebSockets;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Collections.Generic;
 using EchoBot.Media; // Added for Dictionary
+using Microsoft.Graph.Communications.Calls;
+using System.IO; // 添加文件操作支持
 
 public class WebSocketClient
 {
@@ -20,15 +19,43 @@ public class WebSocketClient
     // 添加会议ID属性
     public string MeetingId { get; private set; }
     public string CallId { get; private set; }
+
+    public List<IParticipant> Participants { get; private set; }
     
     // 添加Redis服务
     private RedisService _redisService;
 
+    // 添加音频相关属性
+    private List<short> _audioChunks = new List<short>();
+    private Timer _sendTimer;
+    private readonly int _sendIntervalMs = 3000; // 3秒发送间隔
+    private readonly object _audioLock = new object();
+    
+    // VAD相关属性
+    private readonly double _vadThreshold = 0.01; // VAD阈值，可调整
+    private readonly int _vadMinSamples = 1600; // 最小样本数（100ms @ 16kHz）
+    private readonly int _vadSilenceFrames = 3; // 静音帧数阈值
+    private int _silenceFrameCount = 0;
+    private bool _isVoiceActive = false;
+    private string _processMessageText;
+
     public bool IsConnected => _connected && _webSocket?.State == WebSocketState.Open;
 
-    // 添加设置会议ID的方法
-    public void SetMeetingInfo(string meetingId, string callId = null)
+    /// <summary>
+    /// 获取连接状态信息
+    /// </summary>
+    public string GetConnectionStatus()
     {
+        lock (_lockObject)
+        {
+            return $"内部标志: {_connected}, WebSocket状态: {_webSocket?.State}, IsConnected: {IsConnected}";
+        }
+    }
+
+    // 添加设置会议ID的方法
+    public void SetMeetingInfo(List<IParticipant> participants,string meetingId, string callId = null)
+    {
+        Participants = participants;
         MeetingId = meetingId;
         CallId = callId;
         Console.WriteLine($"设置会议信息 - 会议ID: {meetingId}, 通话ID: {callId ?? "未设置"}");
@@ -74,7 +101,7 @@ public class WebSocketClient
                 {
                     Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
                 };
-                
+
                 var messageData = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(message, jsonOptions);
                 
                 if (messageData.ContainsKey("text"))
@@ -89,37 +116,47 @@ public class WebSocketClient
                         {
                             try
                             {
-                                // 创建额外数据
-                                var additionalData = new Dictionary<string, object>
+                                // 获取所有参与者的displayName
+                                var displayNames = new List<string>();
+                                if (Participants != null && Participants.Count > 0)
                                 {
-                                    ["WebSocketMessage"] = message,
-                                    ["ProcessedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                                    ["SessionId"] = Guid.NewGuid().ToString()
-                                };
-                                
-                                // 使用全量数据存储方式，覆盖之前的记录
-                                var success = await _redisService.SaveMeetingFullTranscriptionAsync(
-                                    MeetingId, 
-                                    CallId ?? "unknown", 
-                                    transcriptionText, 
-                                    additionalData
-                                );
-                                
-                                if (success)
-                                {
-                                    Console.WriteLine($"[Redis] 会议全量语音识别结果已以key 'meeting:{MeetingId}:transcription' 存入Redis - 会议ID: {MeetingId}");
-                                    
-                                    // 获取会议摘要信息
-                                    var meetingSummary = await _redisService.GetMeetingInfoAsync(MeetingId);
-                                    if (!string.IsNullOrEmpty(meetingSummary))
+                                    foreach (var participant in Participants)
                                     {
-                                        Console.WriteLine($"[Redis] 会议摘要: {meetingSummary}");
+                                        if (participant?.Resource?.Info?.Identity?.User != null)
+                                        {
+                                            var displayName = participant.Resource.Info.Identity.User.DisplayName;
+                                            if (!string.IsNullOrEmpty(displayName))
+                                            {
+                                                displayNames.Add(displayName);
+                                            }
+                                        }
                                     }
                                 }
-                                else
+
+                                // 检查并移除字幕信息
+                                var cleanText = ProcessTranscriptionText(transcriptionText, _processMessageText);
+                                
+                                _processMessageText = _processMessageText + cleanText;
+                                // 使用与SpeechService一致的数据格式
+                                var asrResult = new
                                 {
-                                    Console.WriteLine($"[Redis] 保存会议全量语音识别结果到Redis失败 - 会议ID: {MeetingId}");
-                                }
+                                    text = _processMessageText,
+                                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                                    voice_id = messageData.ContainsKey("voice_id") ? messageData["voice_id"].ToString() : "",
+                                    message_id = messageData.ContainsKey("message_id") ? messageData["message_id"].ToString() : "",
+                                    start_time = messageData.ContainsKey("start_time") ? messageData["start_time"].ToString() : "",
+                                    end_time = messageData.ContainsKey("end_time") ? messageData["end_time"].ToString() : "",
+                                    display_name = displayNames,
+                                    meeting_id = MeetingId,
+                                    slice_type = messageData.ContainsKey("slice_type") ? messageData["slice_type"].ToString() : ""
+                                };
+                                
+                                // 序列化为JSON并存入Redis
+                                var jsonResult = System.Text.Json.JsonSerializer.Serialize(asrResult, jsonOptions);
+                                var key = $"meeting:{MeetingId}:transcription";
+                                await _redisService.SetAsync(key, jsonResult, TimeSpan.FromHours(24)); // 保存24小时
+                                
+                                Console.WriteLine($"[Redis] ASR结果已存入Redis，key: {key}, 内容: {jsonResult}");
                             }
                             catch (Exception redisEx)
                             {
@@ -130,9 +167,6 @@ public class WebSocketClient
                         {
                             Console.WriteLine($"[Redis] Redis服务未配置或会议ID未设置，跳过Redis保存");
                         }
-                        
-                        // 记录会议活动
-                        await LogMeetingActivity(transcriptionText);
                     }
                 }
             }
@@ -140,84 +174,6 @@ public class WebSocketClient
         catch (Exception ex)
         {
             Console.WriteLine($"处理会议消息时出错: {ex.Message}");
-        }
-    }
-
-    // 获取会议活动数量的辅助方法
-    private async Task<int> GetMeetingActivitiesCount(string meetingId)
-    {
-        try
-        {
-            if (_redisService != null)
-            {
-                var activities = await _redisService.GetMeetingActivitiesByTimeAsync(meetingId, 1000); // 获取更多活动来计算总数
-                return activities.Count;
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"获取会议活动数量时出错: {ex.Message}");
-        }
-        return 0;
-    }
-
-    // 记录会议活动的方法
-    private async Task LogMeetingActivity(string activity)
-    {
-        try
-        {
-            var logEntry = new
-            {
-                MeetingId = MeetingId,
-                CallId = CallId,
-                Activity = activity,
-                Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                Type = "Transcription"
-            };
-            
-            // 配置JSON序列化选项，确保中文字符正确显示
-            var jsonOptions = new System.Text.Json.JsonSerializerOptions
-            {
-                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                WriteIndented = false
-            };
-            
-            var logJson = System.Text.Json.JsonSerializer.Serialize(logEntry, jsonOptions);
-            Console.WriteLine($"[会议日志] {logJson}");
-            
-            // 保存到Redis（如果Redis服务可用）
-            if (_redisService != null && !string.IsNullOrEmpty(MeetingId))
-            {
-                try
-                {
-                    var success = await _redisService.SaveMeetingFullTranscriptionAsync(
-                        MeetingId, 
-                        CallId ?? "unknown", 
-                        activity
-                    );
-                    
-                    if (success)
-                    {
-                        Console.WriteLine($"[Redis] 会议全量语音识别结果已保存到Redis - 会议ID: {MeetingId}");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[Redis] 保存会议全量语音识别结果到Redis失败 - 会议ID: {MeetingId}");
-                    }
-                }
-                catch (Exception redisEx)
-                {
-                    Console.WriteLine($"[Redis] 保存到Redis时出错: {redisEx.Message}");
-                }
-            }
-            else
-            {
-                Console.WriteLine("[Redis] Redis服务未配置或会议ID未设置，跳过Redis保存");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"记录会议活动时出错: {ex.Message}");
         }
     }
 
@@ -291,18 +247,114 @@ public class WebSocketClient
 
         try
         {
-            await _webSocket.SendAsync(
-                new ArraySegment<byte>(ConvertBufferToInt16Array(message)),
-                WebSocketMessageType.Binary,
-                true,
-                _cancellationTokenSource.Token);
+            // 将字节数组转换为Int16数组
+            var int16Data = ConvertBytesToInt16Array(message);
+            
+            // 使用VAD判断是否有语音活动
+            if (HasVoiceActivity(int16Data))
+            {
+                // 检测到语音活动，添加到缓冲区
+                lock (_audioLock)
+                {
+                    _audioChunks.AddRange(int16Data);
+                }
+                
+                // 启动定时器（如果还没启动）
+                StartSendTimer();
+            }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"发送消息失败: {ex.Message}");
-            await HandleConnectionError();
+            Console.WriteLine($"处理音频数据失败: {ex.Message}");
             throw;
         }
+    }
+    
+    private void StartSendTimer()
+    {
+        if (_sendTimer == null)
+        {
+            _sendTimer = new Timer(async _ => await SendAudioChunks(), null, _sendIntervalMs, _sendIntervalMs);
+            Console.WriteLine($"音频发送定时器已启动，间隔: {_sendIntervalMs}ms");
+        }
+    }
+    
+    private async Task SendAudioChunks()
+    {
+        if (!IsConnected || _webSocket?.State != WebSocketState.Open)
+        {
+            return;
+        }
+        
+        lock (_audioLock)
+        {
+            if (_audioChunks.Count == 0)
+            {
+                return;
+            }
+            
+            // 获取累积的音频数据
+            var audioData = _audioChunks.ToArray();
+            _audioChunks.Clear();
+            
+            // 转换为字节数组
+            var byteData = ConvertInt16ArrayToBytes(audioData);
+            
+            // 异步发送（不等待，避免阻塞定时器）
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await _webSocket.SendAsync(
+                        new ArraySegment<byte>(byteData),
+                        WebSocketMessageType.Binary,
+                        true,
+                        _cancellationTokenSource.Token);
+                    
+                    Console.WriteLine($"已发送音频块，样本数: {audioData.Length}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"发送音频数据失败: {ex.Message}");
+                }
+            });
+        }
+    }
+    
+    // 新增：将字节数组转换为Int16数组
+    private short[] ConvertBytesToInt16Array(byte[] buffer)
+    {
+        if (buffer == null || buffer.Length % 2 != 0)
+            throw new ArgumentException("缓冲区长度必须是2的倍数", nameof(buffer));
+
+        int length = buffer.Length / 2;
+        short[] result = new short[length];
+
+        for (int i = 0; i < length; i++)
+        {
+            int index = i * 2;
+            result[i] = (short)((buffer[index] << 8) | buffer[index + 1]);
+        }
+
+        return result;
+    }
+    
+    // 新增：将Int16数组转换为字节数组
+    private byte[] ConvertInt16ArrayToBytes(short[] int16Array)
+    {
+        if (int16Array == null)
+            throw new ArgumentNullException(nameof(int16Array));
+
+        byte[] result = new byte[int16Array.Length * 2];
+        
+        for (int i = 0; i < int16Array.Length; i++)
+        {
+            int index = i * 2;
+            result[index] = (byte)(int16Array[i] >> 8);     // 高位字节
+            result[index + 1] = (byte)(int16Array[i] & 0xFF); // 低位字节
+        }
+        
+        return result;
     }
 
     public async Task StartListening()
@@ -461,6 +513,16 @@ public class WebSocketClient
         _isListening = false;
         _cancellationTokenSource.Cancel();
         
+        // 停止并清理定时器
+        _sendTimer?.Dispose();
+        _sendTimer = null;
+        
+        // 清空音频缓冲区
+        lock (_audioLock)
+        {
+            _audioChunks.Clear();
+        }
+        
         lock (_lockObject)
         {
             _connected = false;
@@ -496,31 +558,179 @@ public class WebSocketClient
         _cancellationTokenSource?.Dispose();
     }
     
-    public static byte[] ConvertBufferToInt16Array(byte[] buffer)
+    // 新增：VAD语音活动检测方法
+    private bool HasVoiceActivity(short[] audioData)
     {
-        if (buffer == null)
-            throw new ArgumentNullException(nameof(buffer));
-
-        // 确保缓冲区长度是2的倍数（每个Int16由2个字节组成）
-        if (buffer.Length % 2 != 0)
-            throw new ArgumentException("缓冲区长度必须是2的倍数", nameof(buffer));
-
-        int length = buffer.Length / 2;
-        byte[] result = new byte[length];
-
-        for (int i = 0; i < length; i++)
+        if (audioData == null || audioData.Length == 0)
+            return false;
+            
+        // 计算音频数据的能量（RMS）
+        double sum = 0;
+        for (int i = 0; i < audioData.Length; i++)
         {
-            // 计算当前Int16在缓冲区中的起始索引
-            int index = i * 2;
+            sum += (double)(audioData[i] * audioData[i]);
+        }
+        double rms = Math.Sqrt(sum / audioData.Length);
+        
+        // 将RMS值归一化到0-1范围（假设16位音频的最大值是32767）
+        double normalizedRms = rms / 32767.0;
+        
+        // 检查是否超过VAD阈值
+        bool hasVoice = normalizedRms > _vadThreshold;
+        
+        // 更新静音帧计数和语音活动状态
+        if (hasVoice)
+        {
+            _silenceFrameCount = 0;
+            _isVoiceActive = true;
+        }
+        else
+        {
+            _silenceFrameCount++;
+            // 如果连续多帧都是静音，则认为语音活动结束
+            if (_silenceFrameCount >= _vadSilenceFrames)
+            {
+                _isVoiceActive = false;
+            }
+        }
+        
+        // 记录VAD检测结果（可选，用于调试）
+        if (audioData.Length >= _vadMinSamples)
+        {
+            Console.WriteLine($"[VAD] RMS: {normalizedRms:F6}, 阈值: {_vadThreshold:F6}, 有语音: {hasVoice}, 静音帧: {_silenceFrameCount}");
+        }
+        
+        return hasVoice || _isVoiceActive; // 返回当前帧有语音或之前有语音活动
+    }
+    
+    // 新增：处理转录文本的方法（集成字幕移除和去重）
+    private string ProcessTranscriptionText(string text, string existingText)
+    {
+        if (string.IsNullOrEmpty(text))
+            return string.Empty;
+            
+        // 第一步：移除字幕信息
+        var cleanText = RemoveSubtitleInfoOnly(text);
+        
+        // 第二步：去重处理
+        var newText = GetNewTextOnly(existingText, cleanText);
+        
+        return newText;
+    }
+    
+    // 新增：仅移除字幕信息的方法
+    private string RemoveSubtitleInfoOnly(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+            
+        // 定义需要移除的字幕信息模式（支持多种变体）
+        var subtitlePatterns = new[]
+        {
+            "字幕由 Am ara. org 社群提供",
+            "字幕由 Amara.org 社群提供",
+            "字幕由 Amara org 社群提供",
+            "字幕由 Am ara.org 社群提供",
+            "字幕由 Am ara . org 社群提供",
+            "字幕由 Am ara .org 社群提供",
+            "字幕由 Amara . org 社群提供",
+            "字幕由 Amara .org 社群提供"
+        };
+        
+        var cleanText = text;
+        foreach (var pattern in subtitlePatterns)
+        {
+            // 移除完整的字幕信息
+            cleanText = cleanText.Replace(pattern, "");
+            
+            // 移除可能包含额外空格的变体
+            var spacedPattern = pattern.Replace(" ", "\\s+");
+            cleanText = System.Text.RegularExpressions.Regex.Replace(cleanText, spacedPattern, "");
+        }
+        
+        // 清理可能留下的多余空格
+        cleanText = System.Text.RegularExpressions.Regex.Replace(cleanText, "\\s+", " ").Trim();
+        
+        return cleanText;
+    }
 
-            // 大端字节序：高位字节在前，低位字节在后
-            byte highByte = buffer[index];
-            byte lowByte = buffer[index + 1];
+    // 新增：获取新增文本的方法（优化版）
+    private string GetNewTextOnly(string existingText, string newText)
+    {
+        if (string.IsNullOrEmpty(newText))
+            return string.Empty;
 
-            // 组合成Int16
-            result[i] = (byte)((highByte << 8) | lowByte);
+        if (string.IsNullOrEmpty(existingText))
+            return newText;
+
+        // 如果新文本完全包含在现有文本中，返回空字符串
+        if (existingText.Contains(newText))
+            return string.Empty;
+
+        // 查找新增的文本部分
+        var newPart = FindNewTextPart(existingText, newText);
+        
+        if (!string.IsNullOrEmpty(newPart))
+        {
+            Console.WriteLine($"[去重] 检测到新增部分: '{newPart}'");
+            return newPart;
         }
 
-        return result;
+        // 如果无法检测到新增部分，返回完整新文本
+        return newText;
+    }
+
+    // 查找新增文本部分的核心算法
+    private string FindNewTextPart(string existingText, string newText)
+    {
+        // 方法1: 从末尾开始查找，找到第一个不同的位置
+        int startIndex = FindFirstDifferentPosition(existingText, newText);
+        if (startIndex >= 0 && startIndex < newText.Length)
+        {
+            return newText.Substring(startIndex);
+        }
+
+        // 方法2: 从开头开始查找，找到第一个不同的位置
+        int endIndex = FindLastDifferentPosition(existingText, newText);
+        if (endIndex >= 0)
+        {
+            return newText.Substring(0, endIndex + 1);
+        }
+
+        return string.Empty;
+    }
+
+    // 从末尾开始查找第一个不同的位置
+    private int FindFirstDifferentPosition(string existingText, string newText)
+    {
+        int minLength = Math.Min(existingText.Length, newText.Length);
+        
+        for (int i = 0; i < minLength; i++)
+        {
+            if (existingText[i] != newText[i])
+            {
+                return i;
+            }
+        }
+        
+        // 如果前面都相同，返回新文本中超出部分的位置
+        return minLength < newText.Length ? minLength : -1;
+    }
+
+    // 从开头开始查找最后一个不同的位置
+    private int FindLastDifferentPosition(string existingText, string newText)
+    {
+        int minLength = Math.Min(existingText.Length, newText.Length);
+        
+        for (int i = 1; i <= minLength; i++)
+        {
+            if (existingText[existingText.Length - i] != newText[newText.Length - i])
+            {
+                return newText.Length - i;
+            }
+        }
+        
+        // 如果后面都相同，返回新文本中前面部分的位置
+        return minLength < newText.Length ? minLength - 1 : -1;
     }
 }

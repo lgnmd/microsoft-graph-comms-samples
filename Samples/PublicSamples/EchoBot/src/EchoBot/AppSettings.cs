@@ -115,6 +115,14 @@ namespace EchoBot
         /// Gets or sets whether to enable Redis functionality
         /// </summary>
         public bool EnableRedis { get; set; } = false;
+        
+        public string VolicengineAppId { get; set; }
+        public string VolicengineAppSecret { get; set; }
+        
+        public string TentAppId { get; set; }
+        public string TentAppSecret { get; set; }
+        public string TentAppSecretId { get; set; }
+
     }
 }
 

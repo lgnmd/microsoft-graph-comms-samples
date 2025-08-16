@@ -16,7 +16,7 @@ namespace EchoBot
         /// Redis连接字符串
         /// </summary>
         [Required]
-        public string ConnectionString { get; set; } = "r-bp1qom3k4nhkeqcw2qpd.redis.rds.aliyuncs.com:6379,password=7iBgEs7gWJbO";
+        public string ConnectionString { get; set; }
 
         /// <summary>
         /// 连接超时时间（毫秒）
