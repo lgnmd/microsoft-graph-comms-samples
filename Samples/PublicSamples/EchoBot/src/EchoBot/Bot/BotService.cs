@@ -192,36 +192,60 @@ namespace EchoBot.Bot
             // A tracking id for logging purposes. Helps identify this call in logs.
             var scenarioId = Guid.NewGuid();
 
-            var (chatInfo, meetingInfo) = JoinInfo.ParseJoinURL(joinCallBody.JoinUrl);
-
-            var tenantId = (meetingInfo as OrganizerMeetingInfo).Organizer.GetPrimaryIdentity().GetTenantId();
-            var mediaSession = this.CreateLocalMediaSession();
-
-            var joinParams = new JoinMeetingParameters(chatInfo, meetingInfo, mediaSession)
+            // 如果是长链接走原有逻辑
+            if (JoinInfo.IsFullUrl(joinCallBody.JoinUrl)) 
             {
-                TenantId = tenantId,
-            };
+                var (chatInfo, meetingInfo) = JoinInfo.ParseJoinURL(joinCallBody.JoinUrl);
 
-            if (!string.IsNullOrWhiteSpace(joinCallBody.DisplayName))
-            {
-                // Teams client does not allow changing of ones own display name.
-                // If display name is specified, we join as anonymous (guest) user
-                // with the specified display name.  This will put bot into lobby
-                // unless lobby bypass is disabled.
-                joinParams.GuestIdentity = new Identity
+                var tenantId = (meetingInfo as OrganizerMeetingInfo).Organizer.GetPrimaryIdentity().GetTenantId();
+                var mediaSession = this.CreateLocalMediaSession();
+
+                var joinParams = new JoinMeetingParameters(chatInfo, meetingInfo, mediaSession)
                 {
-                    Id = Guid.NewGuid().ToString(),
-                    DisplayName = joinCallBody.DisplayName,
+                    TenantId = tenantId,
                 };
-            }
 
-            if (!this.CallHandlers.TryGetValue(joinParams.ChatInfo.ThreadId, out CallHandler? call))
+                if (!string.IsNullOrWhiteSpace(joinCallBody.DisplayName))
+                {
+                    // Teams client does not allow changing of ones own display name.
+                    // If display name is specified, we join as anonymous (guest) user
+                    // with the specified display name.  This will put bot into lobby
+                    // unless lobby bypass is disabled.
+                    joinParams.GuestIdentity = new Identity
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        DisplayName = joinCallBody.DisplayName,
+                    };
+                }
+
+                if (!this.CallHandlers.TryGetValue(joinParams.ChatInfo.ThreadId, out CallHandler? call))
+                {
+                    var statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId).ConfigureAwait(false);
+                    statefulCall.GraphLogger.Info($"Call creation complete: {statefulCall.Id}");
+                    _logger.LogInformation($"Call creation complete: {statefulCall.Id}");
+                    return statefulCall;
+                }
+            } 
+            else
             {
-                var statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId).ConfigureAwait(false);
+                var (meetingId, passcode) = JoinInfo.ParseJoinShortURL(joinCallBody.JoinUrl);
+                var meetingInfo = new JoinMeetingIdMeetingInfo {
+                    JoinMeetingId = meetingId,
+                    Passcode = passcode,
+                };
+    
+                var mediaSession = this.CreateLocalMediaSession();
+                var joinParams = new JoinMeetingParameters(new ChatInfo(), meetingInfo, mediaSession) 
+                {
+                    TenantId = tenantId,
+                }; 
+                var statefulCall = await Client.Calls().AddAsync(joinParams, scenarioId);
                 statefulCall.GraphLogger.Info($"Call creation complete: {statefulCall.Id}");
                 _logger.LogInformation($"Call creation complete: {statefulCall.Id}");
                 return statefulCall;
-            }
+            } 
+            
+    
 
             throw new Exception("Call has already been added");
         }

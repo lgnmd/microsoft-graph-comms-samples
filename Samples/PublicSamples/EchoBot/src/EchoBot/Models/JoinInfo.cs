@@ -76,5 +76,38 @@ namespace EchoBot.Models
                 return (chatInfo, meetingInfo);
             }
         }
+
+        public static bool IsFullUrl(string joinURL)
+        {
+            if (string.IsNullOrEmpty(joinURL))
+            {
+                throw new ArgumentException($"Join URL cannot be null or empty: {joinURL}", nameof(joinURL));
+            }
+            var decodedURL = WebUtility.UrlDecode(joinURL);
+            var regex = new Regex("https://teams\\.microsoft\\.com.*/(?<thread>[^/]+)/(?<message>[^/]+)\\?context=(?<context>{.*})");
+            var match = regex.Match(decodedURL);
+            return match.Success;
+        }
+
+
+        public static (string, string) ParseJoinShortURL(string joinURL)
+        {
+            if (string.IsNullOrEmpty(joinURL))
+            {
+                throw new ArgumentException($"Join URL cannot be null or empty: {joinURL}", nameof(joinURL));
+            }
+
+            var decodedURL = WebUtility.UrlDecode(joinURL);
+
+            var regex = new Regex("https://teams\\.microsoft\\.com/meet/(?<meetingId>.+?)\\?p=(?<passcode>.+)");
+            var match = regex.Match(decodedURL);
+            if (!match.Success)
+            {
+                throw new ArgumentException($"Join URL cannot be parsed: {joinURL}", nameof(joinURL));
+            }
+
+            return (match.Groups["meetingId"].Value, match.Groups["passcode"].Value)
+
+        }
     }
 }
